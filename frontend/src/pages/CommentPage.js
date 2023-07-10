@@ -1,12 +1,16 @@
+/* eslint-disable */
+
 import { Helmet } from 'react-helmet-async';
 import { filter } from 'lodash';
 import { sentenceCase } from 'change-case';
 import { useState, useEffect } from 'react';
+import axios from 'axios';
 
 // @mui
 import {
     Container,
     Typography,
+    Tooltip,
   Card,
   Table,
   Paper,
@@ -24,6 +28,7 @@ import {
 } from '@mui/material';
 
 import MyBarChart from '../components/chart/BarChart';
+import PieChart from '../components/chart/PieChart';
 import {ProductCartWidget, ProductFilterSidebar, ProductList, ProductSort} from "../sections/@dashboard/products";
 import PRODUCTS from "../_mock/products";
 
@@ -33,17 +38,49 @@ export default function CommentPage() {
     const [modelID, setModelID] = useState('');
     const [submitted, setSubmitted] = useState(false);
     const [MODELLIST, setMODELLIST] = useState([]);
+    const [title, setTitle] = useState('');
+    const [thumbnail, setThumbnail] = useState('');
+    const [prevUrl, setPrevUrl] = useState('');
+    const [pieData, setPieData] = useState([])
+    const [isHovered, setIsHovered] = useState(false);
+
+    const fakedataPie = [
+      { label: 'Apples', value: 10 }, 
+      { label: 'Oranges', value: 20 },
+      { label: 'Banana', value: 50 },
+    ];
+
+    const apikey = process.env.REACT_APP_YOUTUBE_API_KEY
+    const extractVideoId = url => url.split('v=')[1]?.split('&')[0];
+  
+    const fetchYoutubeData = async () => {
+      const videoId = extractVideoId(url);
+      const apikey = process.env.REACT_APP_YOUTUBE_API_KEY;
+      const response = await axios.get(
+        `https://www.googleapis.com/youtube/v3/videos?id=${videoId}&key=${apikey}&part=snippet`
+      );
+  
+      setTitle(response.data.items[0].snippet.title);
+      setThumbnail(response.data.items[0].snippet.thumbnails.high.url);
+    };
 
     useEffect(() => {
-        fetch('http://127.0.0.1:5000/api/model')
+        fetch('http://127.0.0.1:8000/api/model/find')
         // fetch('https://5d800273-5a71-4616-9066-1ce6d6c6280e.mock.pstmn.io/127.0.0.1/model')
             .then(response => response.json())
             .then(data => setMODELLIST(data))  // Set the state once data is fetched
             .catch(error => console.error('Error:', error));
-    }, []);  // Empty dependency array means this effect runs once on mount
+
+            if (url !== prevUrl) { // check if current URL is different from previous URL
+              setPrevUrl(url); // update previous URL state
+              fetchYoutubeData(); // fetch video data
+          }
+      }, [url, prevUrl]); // updated dependency array
 
     const handleSubmit = (e) => {
       e.preventDefault();
+      console.log(apikey)
+      // setUrlChange(!urlChange);
       setSubmitted(true);
     };
 
@@ -69,12 +106,20 @@ export default function CommentPage() {
             width: '100%' // You might need to adjust this to ensure all elements fit
           }}
         >
-          <TextField
-            label="Enter a URL"
-            value={url}
-            style={{ width: '70%' }} // You might need to adjust this to ensure all elements fit
-            onChange={(e) => setUrl(e.target.value)}
-          />
+            <Tooltip title={
+              <>
+              <Typography variant="h5" sx={{ mt: 3, mb: 2 }}>
+                  Video Title: {title}
+                </Typography>
+                <img src={thumbnail} alt={title} style={{ width: '300px' }} />
+              </>
+            } placement="right">
+              <TextField
+                label="Enter a URL"
+                style={{ width: '70%' }}
+                onChange={(e) => setUrl(e.target.value)}
+              />
+            </Tooltip>
             <FormControl style={{ width: '15%' }}>
             <InputLabel>#Comments</InputLabel>
             <Select
@@ -100,12 +145,23 @@ export default function CommentPage() {
                 </Select>
             </FormControl>
 
-          <Button type="submit" variant="contained" color="primary">
+          <Button type="submit" variant="c`ontained" color="primary">
             Submit
           </Button>
         </form>
 
-          {submitted && <MyBarChart url={url} number={numComments} />}
+        {submitted && (
+        <>
+          {/* <Typography variant="h5" sx={{ mt: 3, mb: 2 }}>
+            Video Title: {title}
+          </Typography>
+          <img src={thumbnail} alt={title} style={{ width: '300px' }} /> */}
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <MyBarChart url={url} number={numComments} model_id={modelID} />
+            <PieChart data={fakedataPie} outerRadius={200} innerRadius={100} />
+        </div>
+        </>
+      )}      
       </Container>
     </>
   );

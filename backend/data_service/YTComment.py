@@ -14,35 +14,53 @@
 # pip install python-dotenv
 # pip install mysql-connector-python
 # pip install validators
+# pip install Flask
 
 import os
-import sys
-sys.path.append("..")
-import preprocessing_pipeline.preprocessing_script as second_service
 from urllib.parse import urlparse
 from urllib.parse import parse_qs
 from datetime import datetime
+
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
 from apiclient.errors import HttpError
 import mysql.connector
 import validators
 from validators.utils import ValidationFailure
+from flask import Flask, request, Response, jsonify
+import requests
+app = Flask(__name__)
 
-
-def process_comments(url, comment_count, job_id):
+@app.route("/comments", methods=['GET','POST'])
+def process_comments():
     try:
+        data = request.json
+        if 'url' not in data or 'commentcount' not in data or 'jobid' not in data or 'modelid' not in data:
+            return jsonify({'status': 'error', 'message': 'url, commentcount, jobID, and model_id are required fields'}), 400
+        url = data['url']
+        comment_count = data['commentcount']
+        job_id = data['jobid']
+        model_id = data['modelid']
         if not url:
             raise ValueError("Empty url")
         elif not comment_count:
             raise ValueError("Empty Comment count")
         elif not job_id:
             raise ValueError("Empty job id")
+        elif not model_id:
+            raise ValueError("Empty model id")
+
         load_dotenv()
         video_id = get_video_id_from_url(url)
         comments = get_comments(video_id, comment_count)
         save_comments_to_database(job_id, comments)
-        second_service.runner(job_id)
+        preprocess_url = 'http://localhost:8002/api/preprocess'
+        response = requests.post(preprocess_url, json={'jobID': job_id, 'model_id': model_id})
+        if response.status_code == 200:
+            return Response("Comments OK", status=200)
+        else:
+            return Response("Future Calls Failed", status=500)
+
     except KeyError:
         print("Please enter a valid youtube video link......")
     except ValidationFailure:
@@ -114,4 +132,6 @@ def get_comments(video_id, comment_count, comments = [], pgtoken=""):
         return get_comments(video_id, comment_count, comments, response["nextPageToken"])
     else:
         return comments
-# process_comments("https://www.youtube.com/watch?v=8LKAFMByFTY",50,'last123')
+    
+if __name__ == '__main__':
+    app.run(debug = True, port=8001)

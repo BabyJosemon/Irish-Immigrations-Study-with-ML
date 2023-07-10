@@ -1,28 +1,57 @@
 # imports
-import nltk
 import os
+import nltk
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize 
 from nltk.stem import PorterStemmer, WordNetLemmatizer
 from nltk.corpus import wordnet
 from nltk import pos_tag
-import numpy as np
+nltk.download('punkt')
+nltk.download('stopwords')
+nltk.download('averaged_perceptron_tagger')
+nltk.download('wordnet')
+nltk.download('punkt')
+nltk.download('omw-1.4')
 import re
 import pickle
 from langdetect import detect
 import tensorflow as tf
 from pymongo import MongoClient
-from datetime import datetime
-import random
 import mysql.connector
-import sys
-sys.path.append("..")
-import nlp_engine.model_output as third_service
-
+from flask import Flask
+from flask import request, jsonify
+from flask import Response
+import requests
+app = Flask(__name__)
 
 
 # mise en place
 MAX_SEQUENCE_LENGTH=100
+
+@app.route("/api/preprocess", methods=['POST'])
+def runner():
+    data = request.json
+    if 'jobID' not in data or 'model_id' not in data:
+        return jsonify({'status': 'error', 'message': 'jobID and model_id are required fields'}), 400
+    jobID = data.get('jobID')
+    modelID = data.get('model_id')
+    if modelID not in [1, 2]:
+        return jsonify({'status': 'error', 'message': 'Valid values for model_id are 1,2'}), 400
+    try:
+        sentences = SQLConnector(jobID)
+        padded_sequences, testCorpus = generate_embeddings(sentences)
+        SaveCorpusSQL(testCorpus, jobID)
+        push_mongo(padded_sequences, jobID)
+        model_runner_url = 'http://localhost:8003/api/callmodel'
+        response = requests.post(model_runner_url, json={'jobID': jobID, 'model_id': modelID})
+        if response.status_code == 200:
+            return jsonify({'status': 'success', 'message': 'Preprocessing completed and model_runner executed successfully'}), 200
+        else:
+            return jsonify({'status': 'error', 'message': 'Received bad status from model_runner'}), 500
+    except Exception as e:
+        print("An error occurred during preprocessing:", str(e))
+        return jsonify({'status': 'error', 'message': 'Preprocessing runner failed'}), 500
+
 def emoji_dictionary():
     emoji_dict = {}
     with open('emoji.txt', 'r', encoding='latin-1') as emoji_file:
@@ -74,12 +103,33 @@ def SQLConnector(jobID):
         host=os.getenv('MYSQL_HOST'),
         database=os.getenv('MYSQL_DB')
     )
-
     cursor = connection.cursor()
     cursor.execute('SELECT `comments` FROM `usercomments` WHERE `jobid` = %s;', (jobID,))
     results = cursor.fetchall()
     sentences = [row[0] for row in results]
     return sentences
+
+def SaveCorpusSQL(testCorpus, jobID):
+    connection = mysql.connector.connect(
+        user=os.getenv('MYSQL_ROOT_USERNAME'),
+        password=os.getenv('MYSQL_ROOT_PASSWORD'),
+        host=os.getenv('MYSQL_HOST'),
+        database=os.getenv('MYSQL_DB')
+    )
+    try:
+        cursor = connection.cursor()
+        sentences = []
+        for sentence in testCorpus:
+            sql = "INSERT INTO emotions_texts (job_id, sentence) VALUES (%s, %s)"
+            cursor.execute(sql, (jobID, sentence))
+            sentences.append(sentence)
+        connection.commit()
+    except Exception as e:
+        print(f"An error occurred while storing data: {str(e)}")
+        return []
+
+    finally:
+        connection.close()
 
 def generate_embeddings(sentences):
     emoji_dict=emoji_dictionary()
@@ -99,7 +149,7 @@ def generate_embeddings(sentences):
         tokenizer = pickle.load(handle)
     input_sequences = tokenizer.texts_to_sequences(testCorpus)
     padded_sequences = tf.keras.preprocessing.sequence.pad_sequences(input_sequences, maxlen=MAX_SEQUENCE_LENGTH)
-    return padded_sequences
+    return padded_sequences, testCorpus
  
 def push_mongo(padded_sequences, jobID):
     try:
@@ -110,16 +160,13 @@ def push_mongo(padded_sequences, jobID):
         for row in padded_sequences:
             document = {str(jobID):row.tolist()}
             collection.insert_one(document)
-        print("Data Pushed Successfully")
+        print("Data Pushed Successfully To MongoDB")
     except Exception as e:
         print("Error while inserting data to MongoDB:")
         print(str(e))
-   
-def runner(jobID):
-    sentences = SQLConnector(jobID)
-    padded_sequences = generate_embeddings(sentences)
-    push_mongo(padded_sequences, jobID)
-    third_service.model_runner(jobID)
+
+if __name__ == '__main__':
+    app.run(debug = True, port=8002)
 
 #Uncomment this before running the file and give the uniqueid created 
 #when you used the jupyter notebook on your system to push code into the MySQL DB
