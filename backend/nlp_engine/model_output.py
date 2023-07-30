@@ -1,83 +1,62 @@
-from pymongo import MongoClient
 import requests
-import os
 import tensorflow as tf
 import numpy as np
 import json
 import os
+import logging
 from dotenv import load_dotenv
 import tensorflow_text as text
 import mysql.connector
 import pandas as pd
 from flask import Flask
-from flask import request, jsonify, Response
+from flask import request, jsonify
+from flask import Response
 
 app = Flask(__name__)
 
 load_dotenv()
 
+
 # mise en place
-savedModels={1: "savedModels/CNN_Model", 2: "savedModels/LSTM_Model", 'goemotion': "savedModels/TransformerSentiment"}
+savedModels={'goemotion': "savedModels/TransformerSentiment"}
 MAX_EMOTIONS_LENGTH=4
 
 @app.route("/api/callmodel", methods=['POST'])
 def model_runner():
     data = request.json
-    if 'jobID' not in data or 'model_id' not in data:
+    if 'jobID' not in data or 'model_id' not in data or 'median_time' not in data:
         return jsonify({'status': 'error', 'message': 'jobID and model_id are required fields'}), 400
     jobID = data.get('jobID')
     modelID = data.get('model_id')
-    if modelID not in [1, 2]:
-        return jsonify({'status': 'error', 'message': 'Valid values for model_id are 1,2'}), 400
-    vector_data = []
-    try:
-        CONNECTION_STRING = os.getenv('MONGO_URI')
-        client= MongoClient(CONNECTION_STRING)
-        db=client.get_database('Vector_Data')
-        collection=db.preprocessed_data
-        testCorpus = GetPreprocText(jobID)
-        alldocuments = collection.find({str(jobID): {'$exists': True}})
-        for document in alldocuments:
-            vector_data.append(document[str(jobID)])
-        vector_array = np.array(vector_data)
-        if len(vector_data) == 0:
-            raise Exception('No vector data found in MongoDB')
-    except Exception as e:
-        print('Connection Failed')
-        print(str(e))
-        return jsonify({'status': 'error', 'message': 'No vector data found in MongoDB'}), 404
-    prediction_summary = predictions(vector_array, testCorpus, modelID, jobID)
+    median_time = data.get('median_time')
+    if modelID not in [1, 2, 3, 4, 5, 6]:
+        return jsonify({'status': 'error', 'message': 'Valid values for model_id are 1,2,3,4,5,6'}), 400
+    
+    class_labels = ['Hateful', 'Non-Hateful', 'Neutral']
+    #prediction_summary = {label: 0 for label in class_labels}
+    topicCorpus = get_topic_text_from_db(jobID)
+    if topicCorpus is None or len(topicCorpus)==0:    
+        return jsonify({'status': 'error', 'message': 'topicCorpus not found in DB'}), 400
+    testCorpus=get_preprocessed_text_from_db(jobID)
+    if testCorpus is None or len(testCorpus)==0:    
+        return jsonify({'status': 'error', 'message': 'test_corpus not found in DB'}), 400
+    prediction_summary = get_predictions_from_deployment(modelID, jobID)
+    prediction_summary = get_predictions_from_go_emotions(prediction_summary, testCorpus, jobID, median_time)
     sentiment_dict = {key: value for key, value in prediction_summary.items() if key not in ['emotions']}
     emotions_json = prediction_summary.get('emotions', {})
-    if SQLConnector(sentiment_dict, jobID) and sendEmotionResultSQL(emotions_json, jobID):
+
+    try:
+       topicsDetected = topic_detection(topicCorpus)
+    except Exception as e:
+        logging.error(f"Error: {str(e)}")
+        return jsonify({'status': 'error', 'message':'Topic modelling error' }), 500
+
+    if add_predictions_to_db(sentiment_dict, jobID, modelID) and add_emotions_results_to_db(emotions_json, jobID) and add_topic_results_to_db(topicsDetected,jobID):
         return jsonify({'status': 'success', 'message': 'Model execution completed successfully'}), 200
     else:
         return jsonify({'status': 'error', 'message': 'Failed to execute model_runner, Persistence Error'}), 500
 
-
-def SQLConnector(prediction_summary, jobID):
-    connection = mysql.connector.connect(
-        user=os.getenv('MYSQL_ROOT_USERNAME'),
-        password=os.getenv('MYSQL_ROOT_PASSWORD'),
-        host=os.getenv('MYSQL_HOST'),
-        database=os.getenv('MYSQL_DB')
-    )
-    try:
-        with connection.cursor() as cursor:
-            for label, ratio in prediction_summary.items():
-                job_output_query = "INSERT INTO job_output (label, ratio, job_id) VALUES (%s, %s, %s)"
-                cursor.execute(job_output_query, (label, ratio, jobID))
-            connection.commit()
-            return True
-
-    except Exception as e:
-        print(f"An error occurred while storing data: {str(e)}")
-        return False
-
-    finally:
-        connection.close()
-
-def GetPreprocText(jobID):
+def get_preprocessed_text_from_db(jobID):
     connection = mysql.connector.connect(
         user=os.getenv('MYSQL_ROOT_USERNAME'),
         password=os.getenv('MYSQL_ROOT_PASSWORD'),
@@ -91,7 +70,48 @@ def GetPreprocText(jobID):
     sentences = [row[0] for row in results]
     return sentences
 
-def generate_json_data(output, jobID):
+def add_predictions_to_db(prediction_summary, jobID, modelID):
+    models=["CNN", "LSTM", "XGBOOST"]
+    connection = mysql.connector.connect(
+        user=os.getenv('MYSQL_ROOT_USERNAME'),
+        password=os.getenv('MYSQL_ROOT_PASSWORD'),
+        host=os.getenv('MYSQL_HOST'),
+        database=os.getenv('MYSQL_DB')
+    )
+    try:
+        with connection.cursor() as cursor:
+            for label, ratio in prediction_summary.items():
+                job_output_query = "INSERT INTO job_output (label, ratio, job_id, model) VALUES (%s, %s, %s, %s)"
+                cursor.execute(job_output_query, (label, ratio, jobID, models[modelID - 1]))
+            connection.commit()
+            return True
+    except Exception as e:
+        print(f"An error occurred while storing data: {str(e)}")
+        return False
+    finally:
+        connection.close()
+
+
+def get_topic_text_from_db(jobID):
+    topicCorpus = []
+    try: 
+        connection = mysql.connector.connect(
+        user=os.getenv('MYSQL_ROOT_USERNAME'),
+        password=os.getenv('MYSQL_ROOT_PASSWORD'),
+        host=os.getenv('MYSQL_HOST'),
+        database=os.getenv('MYSQL_DB')
+        )
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT `sentence` FROM `topics_tokens` WHERE `job_id` = %s;', (jobID,))
+            results = cursor.fetchall()
+        for row in results:
+           tokens_str = row[0]
+           topicCorpus.append(tokens_str)
+    except Exception as e:
+        logging.error(f"Error: {str(e)}")
+    return topicCorpus
+
+def generate_json_data(output, jobID, median_time):
     emotions = {
         0: ["anger", "annoyance", "disapproval"],
         1: ["joy", "amusement", "approval", "excitement"],
@@ -117,11 +137,12 @@ def generate_json_data(output, jobID):
 
     json_data = {
         "job_id": jobID,
-        "result": result
+        "result": result,
+        "median_time":median_time
     }
     return json_data
 
-def sendEmotionResultSQL(json_data, jobID):
+def add_emotions_results_to_db(json_data, jobID):
     connection = mysql.connector.connect(
         user=os.getenv('MYSQL_ROOT_USERNAME'),
         password=os.getenv('MYSQL_ROOT_PASSWORD'),
@@ -141,23 +162,74 @@ def sendEmotionResultSQL(json_data, jobID):
     finally:
         connection.close()
 
-def predictions(padded_sequences, testCorpus, model_id, jobID):
-    class_labels = ['Hateful', 'Non-Hateful', 'Neutral']
-    loaded_model = tf.keras.models.load_model(savedModels[int(model_id)])   
-    emotion_model = tf.keras.models.load_model(savedModels['goemotion'])
-    predictions = loaded_model.predict(padded_sequences)
-    predicted_classes = np.argmax(predictions, axis=1)
-    prediction_summary = {label: 0 for label in class_labels}
-    for predicted_class in predicted_classes:
-        predicted_label = class_labels[predicted_class]
-        prediction_summary[predicted_label] += 1
-    testCorpus = pd.Series(testCorpus)
-    EmotionPredictions = emotion_model.predict(testCorpus)
-    EmotionPredictions = np.argmax(EmotionPredictions, axis=1)
-    jsonResult=generate_json_data(EmotionPredictions, jobID)
-    prediction_summary['emotions']=jsonResult
-    return prediction_summary
+def add_topic_results_to_db(topicsDetected, jobID):
+    try:
+        connection = mysql.connector.connect(
+        user=os.getenv('MYSQL_ROOT_USERNAME'),
+        password=os.getenv('MYSQL_ROOT_PASSWORD'),
+        host=os.getenv('MYSQL_HOST'),
+        database=os.getenv('MYSQL_DB')
+        )
+        with connection.cursor() as cursor:
+            sql = "INSERT INTO topics_result_table (job_id, topic_info) VALUES (%s, %s)"
+            for topic in topicsDetected:
+                cursor.execute(sql, (jobID, json.dumps(topic)))
+            connection.commit()
+            return True
+    except Exception as e:
+        print("An error occurred while storing topic data result:", str(e))
+        return False
+    finally:
+        connection.close()
 
+def topic_detection(topicCorpus):
+    topics_list = []
+    model_base_url = 'http://topic_modelling:8005/predictTopic'
+    try: 
+        request_body={
+            "topic_corpus":topicCorpus
+        }
+        response = requests.post(model_base_url, json=request_body)
+        response_data = response.json()
+        if response.status_code == 200:
+            return response_data
+        else:
+            raise ValueError(f"Request failed for topic Modelling {response.status_code}")
+    except Exception as e:
+        logging.error(f"Error: {str(e)}")
+    
+    return topics_list
+
+def get_predictions_from_deployment(model_id, job_id):
+    model_base_url = 'http://model_deployment:8004/predict'
+    try:
+        request_body={
+            "model_id":model_id,
+            "job_id": job_id
+        }
+        response = requests.post(model_base_url, json=request_body)
+        response_data = response.json() 
+        if response.status_code == 200:
+            return response_data
+        elif response.status_code == 400:
+            error_message = response_data.get('message', 'Unknown error occurred.')
+            raise ValueError(f"Bad Request - {error_message}")
+        else:
+            raise ValueError(f"Request failed with status code {response.status_code}")
+    except requests.exceptions.RequestException as e:
+        raise ValueError(f"Request error - {str(e)}")
+    except Exception as e:
+        raise ValueError(f"Unexpected error - {str(e)}")
+
+
+def get_predictions_from_go_emotions(prediction_summary, testCorpus, jobID, median_time):
+    testCorpus = pd.Series(testCorpus)
+    emotion_model = tf.keras.models.load_model(savedModels['goemotion'])
+    emotion_predictions = emotion_model.predict(testCorpus)
+    emotion_predictions = np.argmax(emotion_predictions, axis=1)
+    json_result = generate_json_data(emotion_predictions, jobID, median_time)
+    prediction_summary['emotions'] = json_result
+    return prediction_summary
 
 if __name__ == '__main__':
     app.run(debug = True, host='0.0.0.0', port=8003)

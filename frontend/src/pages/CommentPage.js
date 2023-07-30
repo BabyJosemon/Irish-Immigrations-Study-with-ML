@@ -5,6 +5,8 @@ import { filter } from 'lodash';
 import { sentenceCase } from 'change-case';
 import { useState, useEffect } from 'react';
 import axios from 'axios';
+import OutlinedInput from '@mui/material/OutlinedInput';
+import ListItemText from '@mui/material/ListItemText';
 
 // @mui
 import {
@@ -41,8 +43,10 @@ export default function CommentPage() {
     const [title, setTitle] = useState('');
     const [thumbnail, setThumbnail] = useState('');
     const [prevUrl, setPrevUrl] = useState('');
-    const [pieData, setPieData] = useState([])
     const [isHovered, setIsHovered] = useState(false);
+    const [selectedPreprocessName, setSelectedPreprocessName] = useState([]);
+    const [selectedPreprocessIDS, setSelectedPreprocessIDS] = useState([]);
+    const [preprocessNameList, setPreprocessNameList] = useState([]);
 
     const fakedataPie = [
       { label: 'Apples', value: 10 }, 
@@ -65,22 +69,68 @@ export default function CommentPage() {
     };
 
     useEffect(() => {
-        fetch('http://127.0.0.1:8000/api/model/find')
-        // fetch('https://5d800273-5a71-4616-9066-1ce6d6c6280e.mock.pstmn.io/127.0.0.1/model')
-            .then(response => response.json())
-            .then(data => setMODELLIST(data))  // Set the state once data is fetched
-            .catch(error => console.error('Error:', error));
+      console.log(process.env.REACT_APP_NLP_PLATFORM_API_URL);
+      axios.get(`${process.env.REACT_APP_NLP_PLATFORM_API_URL}/api/model/find`)
+       .then(response => {
+           setMODELLIST(response.data);
+       })  // Set the state once data is fetched
+       .catch(error => console.error('Error:', error));
 
-            if (url !== prevUrl) { // check if current URL is different from previous URL
-              setPrevUrl(url); // update previous URL state
-              fetchYoutubeData(); // fetch video data
-          }
-      }, [url, prevUrl]); // updated dependency array
+      axios.get(`${process.env.REACT_APP_NLP_PLATFORM_API_URL}/api/preprocessing/find`)
+        .then(response => {
+          const entries = response.data;
+          console.log("entries: ", entries);
+          setPreprocessNameList(entries);
+        })
+        .catch(error => console.error('Error:', error));
+
+        fetchYoutubeData();
+    }, []);  // Empty dependency array means this effect runs once on mount
+
+    const ITEM_HEIGHT = 48;
+    const ITEM_PADDING_TOP = 8;
+    const MenuProps = {
+      PaperProps: {
+        style: {
+          maxHeight: ITEM_HEIGHT * 4.5 + ITEM_PADDING_TOP,
+          width: 250,
+        },
+      },
+    };
+
+    const preprocessNames = [
+      // 'Oliver Hansen',
+      // 'Van Henry',
+      // 'April Tucker',
+      // 'Ralph Hubbard',
+      // 'Omar Alexander',
+      // 'Carlos Abbott',
+      // 'Miriam Wagner',
+      // 'Bradley Wilkerson',
+      // 'Virginia Andrews',
+      // 'Kelly Snyder',
+    ];
+    
+    const handlePreprocessChange = (event, obj) => {
+      const {
+        target: { key, value },
+      } = event;
+      setSelectedPreprocessName(
+        // On autofill we get a stringified value.
+        typeof value === 'string' ? value.split(',') : value,
+      );
+      console.log(obj.key);
+
+      setSelectedPreprocessIDS([...selectedPreprocessIDS, parseInt(obj.key.slice(2))])
+      console.log(selectedPreprocessName);
+      console.log(selectedPreprocessIDS);
+    };
 
     const handleSubmit = (e) => {
       e.preventDefault();
       console.log(apikey)
       // setUrlChange(!urlChange);
+      // console.log('Selected preprocessing ID:', preprocessList.id)
       setSubmitted(true);
     };
 
@@ -111,16 +161,16 @@ export default function CommentPage() {
               <Typography variant="h5" sx={{ mt: 3, mb: 2 }}>
                   Video Title: {title}
                 </Typography>
-                <img src={thumbnail} alt={title} style={{ width: '300px' }} />
+                <img src={thumbnail} alt={title} style={{ width: '200px' }} />
               </>
             } placement="right">
               <TextField
                 label="Enter a URL"
-                style={{ width: '70%' }}
+                style={{ width: '50%' }}
                 onChange={(e) => setUrl(e.target.value)}
               />
             </Tooltip>
-            <FormControl style={{ width: '15%' }}>
+            <FormControl style={{ width: '10%' }}>
             <InputLabel>#Comments</InputLabel>
             <Select
               value={numComments}
@@ -144,6 +194,26 @@ export default function CommentPage() {
                     ))}
                 </Select>
             </FormControl>
+            <FormControl sx={{ m: 1, width: 300 }}>
+              <InputLabel id="demo-multiple-checkbox-label">preprocessing</InputLabel>
+              <Select
+                labelId="demo-multiple-checkbox-label"
+                id="demo-multiple-checkbox"
+                multiple
+                value={selectedPreprocessName}
+                onChange={handlePreprocessChange}
+                input={<OutlinedInput label="Tag" />}
+                renderValue={(selected) => selected.join(', ')}
+                MenuProps={MenuProps}
+              >
+                {preprocessNameList.map((item) => (
+                  <MenuItem key={item.pps_id} value={item.name}>
+                    <Checkbox checked={selectedPreprocessName.indexOf(item.name) > -1} />
+                    <ListItemText primary={item.name} />
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
 
           <Button type="submit" variant="c`ontained" color="primary">
             Submit
@@ -156,10 +226,9 @@ export default function CommentPage() {
             Video Title: {title}
           </Typography>
           <img src={thumbnail} alt={title} style={{ width: '300px' }} /> */}
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <MyBarChart url={url} number={numComments} model_id={modelID} />
-            <PieChart data={fakedataPie} outerRadius={200} innerRadius={100} />
-        </div>
+            <br/>
+            <br/>
+            <MyBarChart url={url} number={numComments} model_id={modelID} preprocessIDs={selectedPreprocessIDS}/>
         </>
       )}      
       </Container>

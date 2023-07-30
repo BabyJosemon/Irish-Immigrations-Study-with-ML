@@ -35,12 +35,13 @@ app = Flask(__name__)
 def process_comments():
     try:
         data = request.json
-        if 'url' not in data or 'commentcount' not in data or 'jobid' not in data or 'modelid' not in data:
-            return jsonify({'status': 'error', 'message': 'url, commentcount, jobID, and model_id are required fields'}), 400
+        if 'url' not in data or 'commentcount' not in data or 'jobid' not in data or 'modelid' not in data or 'pps_id' not in data:
+            return jsonify({'status': 'error', 'message': 'url, commentcount, jobID, model_id, and pps_id are required fields'}), 400
         url = data['url']
         comment_count = data['commentcount']
         job_id = data['jobid']
         model_id = data['modelid']
+        pps_id = data['pps_id']
         if not url:
             raise ValueError("Empty url")
         elif not comment_count:
@@ -49,13 +50,17 @@ def process_comments():
             raise ValueError("Empty job id")
         elif not model_id:
             raise ValueError("Empty model id")
+        elif not pps_id:
+            raise ValueError("Empty pps_id")
 
         load_dotenv()
         video_id = get_video_id_from_url(url)
-        comments = get_comments(video_id, comment_count)
+        comments = get_comments(video_id, comment_count)        
         save_comments_to_database(job_id, comments)
         preprocess_url = 'http://preprocess_service:8002/api/preprocess'
-        response = requests.post(preprocess_url, json={'jobID': job_id, 'model_id': model_id})
+        #preprocess_url = 'http://127.0.0.1:8002/api/preprocess'
+        median_time = get_median_time_for_comments(comments)
+        response = requests.post(preprocess_url, json={'jobID': job_id, 'model_id': model_id, 'pps_id': pps_id, 'median_time': median_time}, timeout=600)
         if response.status_code == 200:
             return Response("Comments OK", status=200)
         else:
@@ -88,16 +93,16 @@ def save_comments_to_database(job_id, comments):
                                        host=os.getenv('MYSQL_HOST'),
                                        database=os.getenv('MYSQL_DB'))
     add_comment = ("INSERT INTO usercomments "
-                   "(jobid, comments, job_time) "
-                   "VALUES (%s, %s, %s)")
+                   "(jobid, comments, comment_date, job_time) "
+                   "VALUES (%s, %s, %s, %s)")
     cursor = cnx.cursor()
     job_time = datetime.now()
 
     for comment in comments:
-        data_comment = (job_id, comment, job_time)
+        data_comment = (job_id, comment[0], comment[1], job_time)
         cursor.execute(add_comment, data_comment)
-        cnx.commit()  
-
+    
+    cnx.commit()  
     cursor.close()
     cnx.close()
 
@@ -115,7 +120,9 @@ def get_comments(video_id, comment_count, comments = [], pgtoken=""):
         if(len(comments) < comment_count):
             parent_id = item["id"]
             topLevelComment = item["snippet"]["topLevelComment"]["snippet"]["textOriginal"]
-            comments.append(topLevelComment)
+            commentDate = item["snippet"]["topLevelComment"]["snippet"]["publishedAt"]
+            commentInfo = (topLevelComment, commentDate)
+            comments.append(commentInfo)
 
             replies = youtube.comments().list(
                 part="snippet",
@@ -126,12 +133,40 @@ def get_comments(video_id, comment_count, comments = [], pgtoken=""):
             for reply in replies["items"]:
                 if(len(comments) < comment_count):
                     replyComment = reply["snippet"]["textOriginal"]
-                    comments.append(replyComment)
+                    replyDate = reply["snippet"]["publishedAt"]
+                    replyInfo = (replyComment, replyDate)
+                    comments.append(replyInfo)
+                else:
+                    return comments
+        else:
+            return comments
 
     if "nextPageToken" in response:
         return get_comments(video_id, comment_count, comments, response["nextPageToken"])
     else:
         return comments
-    
+
+def get_median_time_for_comments(comments):
+    comment_datetimes = []
+    for comment in comments:
+        comment_datetimes.append(comment[1])
+
+    comment_timestamps = [datetime.strptime(time, "%Y-%m-%dT%H:%M:%SZ") for time in comment_datetimes]
+    comment_timestamps = sorted(comment_timestamps)
+    num_timestamps = len(comment_timestamps)
+    if num_timestamps % 2 == 0:
+        date1 = comment_timestamps[num_timestamps // 2 - 1]
+        date2 = comment_timestamps[num_timestamps // 2]
+
+        if date1 < date2:
+            time_diff = date2 - date1
+            median_timestamp = date1 + (time_diff // 2)
+        else:
+            time_diff = date1 - date2
+            median_timestamp = date2 + (time_diff // 2)
+    else:
+        median_timestamp = comment_timestamps[num_timestamps // 2]
+    return median_timestamp.__str__()
+
 if __name__ == '__main__':
     app.run(debug = True, host='0.0.0.0', port=8001)
